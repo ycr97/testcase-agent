@@ -1,140 +1,241 @@
 # 测试用例生成 Agent
 
-基于 LangChain/LangGraph 的 API 测试用例生成 Agent。支持从多种输入源（Swagger、文档、文字描述、已有代码）生成覆盖正常、异常、边界场景的测试用例，并支持端到端流程编排。
+基于 LangChain/LangGraph 的 API 测试用例生成工具。
 
-## 项目结构
+它支持从 Swagger/OpenAPI、Word、Markdown、中文自由描述和已有测试代码中提取接口信息，生成接口测试用例、补齐缺失场景，并输出 E2E 流程定义。
 
-```
-testCaseProject/
-├── agent/
-│   ├── __init__.py
-│   ├── __main__.py              # python -m agent 入口
-│   ├── cli.py                   # CLI 四个命令: generate/analyze/flow/run
-│   ├── config.py                # 配置管理（YAML + 环境变量）
-│   ├── models/
-│   │   └── factory.py           # ChatModel 工厂
-│   ├── parsers/
-│   │   ├── base.py              # 解析器抽象基类
-│   │   ├── swagger_parser.py    # Swagger/OpenAPI 解析（纯代码）
-│   │   ├── text_parser.py       # 中文文字描述解析（LLM）
-│   │   ├── markdown_parser.py   # Markdown 文档解析
-│   │   ├── word_parser.py       # Word 文档解析
-│   │   └── code_analyzer.py     # 已有代码分析（AST + LLM）
-│   ├── prompts/
-│   │   ├── extraction.py        # API 提取 Prompt
-│   │   ├── generation.py        # 用例生成 Prompt
-│   │   ├── gap_analysis.py      # 缺失用例分析 Prompt
-│   │   └── flow_design.py       # 流程设计 Prompt
-│   ├── graph/
-│   │   ├── generate_graph.py    # generate 命令状态图
-│   │   ├── analyze_graph.py     # analyze 命令状态图
-│   │   ├── flow_graph.py        # flow 命令状态图
-│   │   └── nodes/               # 图节点
-│   ├── generators/
-│   │   ├── case_generator.py    # 三轮用例生成（正常/异常/边界）
-│   │   ├── code_generator.py    # Jinja2 模板渲染
-│   │   └── templates/
-│   │       └── test_file.py.j2  # 匹配现有代码风格的模板
-│   ├── schemas/
-│   │   ├── api_schema.py        # APIEndpoint 标准化模型
-│   │   ├── test_case.py         # TestCase/TestSuite 模型
-│   │   ├── flow.py              # FlowDefinition 模型
-│   │   └── llm_output.py        # LLM 结构化输出模型
-│   ├── quality/
-│   │   ├── validator.py         # Schema 校验
-│   │   └── deduplicator.py      # 去重
-│   └── runner/
-│       ├── executor.py          # 测试执行
-│       └── reporter.py          # 报告生成
-├── config/
-│   └── settings.yaml            # 环境配置
-├── generated_tests/             # 生成的测试文件输出目录
-├── promotion/                   # 已有测试（配额调整）
-├── growth_import_export_test/   # 已有测试（结案单导入导出）
-├── pyproject.toml               # 依赖定义
-└── README.md
-```
+## 核心能力
+
+- 多模型支持：通过 `llm.provider` 在 Anthropic 和 OpenAI 间切换
+- 图编排：`generate`、`analyze`、`flow` 三个命令都由 LangGraph 驱动
+- 结构化输出：使用 Pydantic + `with_structured_output()` 约束 LLM 输出
+- 确定性代码生成：测试代码由 Jinja2 模板渲染，不直接让 LLM 产出 Python 文件
+- 质量控制：生成后经过校验、去重和重试逻辑处理
+
+## 架构概览
+
+### generate
+
+`parse_input -> next_endpoint -> generate_cases -> validate_cases -> generate_code`
+
+- 支持多接口逐个处理
+- 校验不通过时按 `max_retries` 重试
+- 最终输出到 `generated_tests/` 或显式指定的路径
+
+### analyze
+
+`analyze_code -> generate_gap_cases -> deduplicate_cases -> generate_code`
+
+- 从已有测试代码中提取接口
+- 生成缺失场景
+- 和现有测试名、请求数据做去重
+
+### flow
+
+`parse_swagger -> design_flow -> output_flow`
+
+- 从 Swagger 读取可用接口
+- 让 LLM 设计调用链
+- 输出 JSON 流程定义
 
 ## 安装
 
+要求：
+
+- Python 3.12+
+
+安装方式：
+
 ```bash
-pip install -e .
+python -m pip install -e .
+```
+
+安装后可直接使用：
+
+```bash
+python -m agent --help
 ```
 
 ## 配置
 
-1. 设置模型 API Key：
+配置文件位于 `config/settings.yaml`。
+
+默认配置示例：
+
+```yaml
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  max_tokens: 4096
+  temperature: 0.0
+```
+
+### 环境变量
+
+Anthropic：
 
 ```bash
 export ANTHROPIC_API_KEY="your-api-key"
-# 或
+```
+
+OpenAI：
+
+```bash
 export OPENAI_API_KEY="your-api-key"
 ```
 
-2. 可选：编辑 `config/settings.yaml` 中的 `llm.provider` 和模型参数。
+可选环境变量：
+
+```bash
+export TEST_ENV="uat"
+export AUTH_TOKEN="your-auth-token"
+```
+
+如果配置了 LangSmith，也会自动开启 tracing：
+
+```bash
+export LANGSMITH_API_KEY="your-langsmith-key"
+export LANGSMITH_PROJECT="testcase-agent"
+```
 
 ## 使用方式
 
-### 从中文描述生成测试用例
+### 1. 从中文描述生成测试用例
 
 ```bash
-python -m agent generate --from-text "调整配额接口，POST方法，路径 /adjustQuota/v1，参数 orgCode, amount, operationType(ADD/SUBTRACT)"
+python -m agent generate \
+  --from-text "调整配额接口，POST方法，路径 /adjustQuota/v1，参数 orgCode, amount, operationType(ADD/SUBTRACT)"
 ```
 
-### 从 Swagger/OpenAPI 文件生成
+### 2. 从 Swagger/OpenAPI 生成测试用例
 
 ```bash
 python -m agent generate --from-swagger ./swagger.json
 ```
 
-### 从 Word 文档生成
+### 3. 从 Word 文档生成测试用例
 
 ```bash
 python -m agent generate --from-doc ./api_doc.docx
 ```
 
-### 从 Markdown 文档生成
+### 4. 从 Markdown 文档生成测试用例
 
 ```bash
 python -m agent generate --from-markdown ./api_doc.md
 ```
 
-### 分析已有代码，补全缺失用例
+### 5. 分析已有测试代码并补全缺失场景
 
 ```bash
-python -m agent analyze --code ./promotion/test_adjust_quota.py
+python -m agent analyze --code ./tests/test_adjust_quota.py
 ```
 
-### 生成 E2E 流程测试
+### 6. 生成 E2E 流程定义
 
 ```bash
-python -m agent flow --endpoints ./swagger.json -d "创建订单后调整配额并导出"
+python -m agent flow \
+  --endpoints ./swagger.json \
+  -d "创建订单后调整配额并导出"
 ```
 
-### 执行生成的测试
+### 7. 执行生成的测试文件
 
 ```bash
 python -m agent run --file ./generated_tests/test_xxx.py
 ```
 
-### 常用选项
+## 常用参数
+
+只生成正常场景：
 
 ```bash
-# 只生成正常场景用例
 python -m agent generate --from-swagger ./swagger.json -c normal
+```
 
-# 指定输出文件
+生成正常 + 异常场景：
+
+```bash
+python -m agent generate --from-swagger ./swagger.json -c normal,abnormal
+```
+
+指定输出文件：
+
+```bash
 python -m agent generate --from-text "..." -o ./my_tests/test_api.py
+```
 
-# 执行指定函数
+指定输出目录：
+
+```bash
+python -m agent generate --from-swagger ./swagger.json -o ./my_tests/
+```
+
+执行指定函数：
+
+```bash
 python -m agent run --file ./generated_tests/test_xxx.py -f test_add_quota,test_subtract_quota
 ```
 
-## 核心设计
+## 输出规则
 
-- **统一中间表示**：所有输入源解析为 `APIEndpoint` 标准格式，输入与生成完全解耦
-- **三轮生成策略**：分别生成正常、异常、边界用例，确保覆盖全面
-- **模板渲染生成代码**：通过 Jinja2 模板确定性渲染，非 LLM 直接生成代码，杜绝语法错误
-- **Pydantic 结构化输出**：使用 `with_structured_output()` 约束 LLM 输出
-- **LangGraph 编排**：通过状态图替代 CLI 中的硬编码线性流程
-- **质量保障**：Pydantic schema 校验 + 去重 + 不确定字段标记 `# TODO: 请确认`
+- `generate` 默认输出到 `generated_tests/`
+- 当输入包含多个接口时：
+  - 如果 `-o` 是目录，按接口路径生成多个文件
+  - 如果 `-o` 是单个 `.py` 文件名，会自动追加接口后缀，避免互相覆盖
+- `flow` 默认输出到 `generated_tests/flow_definition.json`
+
+## 项目结构
+
+```text
+testcase-agent/
+├── agent/
+│   ├── cli.py
+│   ├── config.py
+│   ├── models/
+│   │   └── factory.py
+│   ├── prompts/
+│   │   ├── extraction.py
+│   │   ├── generation.py
+│   │   ├── gap_analysis.py
+│   │   └── flow_design.py
+│   ├── graph/
+│   │   ├── state.py
+│   │   ├── edges.py
+│   │   ├── generate_graph.py
+│   │   ├── analyze_graph.py
+│   │   ├── flow_graph.py
+│   │   └── nodes/
+│   ├── parsers/
+│   ├── generators/
+│   ├── quality/
+│   ├── runner/
+│   └── schemas/
+├── config/
+│   └── settings.yaml
+├── generated_tests/
+├── pyproject.toml
+└── README.md
+```
+
+## 关键模块说明
+
+- `agent/models/factory.py`：统一创建 ChatModel
+- `agent/prompts/`：按场景拆分的 Prompt 模板
+- `agent/graph/`：LangGraph 状态、节点和图定义
+- `agent/parsers/`：多输入源解析器
+- `agent/generators/code_generator.py`：Jinja2 测试代码渲染
+- `agent/schemas/llm_output.py`：LLM 结构化输出模型
+
+## 当前验证
+
+本仓库已经验证过以下基础命令可运行：
+
+```bash
+python -m compileall agent
+python -m pip install -e .
+python -m agent --help
+python -m agent generate --help
+```
+
+真实生成链路仍依赖可用的模型 API Key 和输入样例。
