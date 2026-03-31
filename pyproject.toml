@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "AI Agent for API test case generation"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.45.0",
+    "langgraph>=0.4",
+    "langchain-core>=0.3",
+    "langchain-anthropic>=0.3",
+    "langchain-openai>=0.3",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "python-docx>=1.0",
@@ -19,3 +22,9 @@ dependencies = [
 
 [project.scripts]
 testcase-agent = "agent.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+[tool.setuptools.package-data]
+agent = ["generators/templates/*.j2"]

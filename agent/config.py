@@ -54,10 +54,12 @@ def get_settings() -> Settings:
 
     # LLM 配置
     llm_raw = raw.get("llm", {})
+    provider = llm_raw.get("provider", "anthropic")
+    env_key = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
     llm = LLMSettings(
-        provider=llm_raw.get("provider", "anthropic"),
+        provider=provider,
         model=llm_raw.get("model", "claude-sonnet-4-20250514"),
-        api_key=os.environ.get("ANTHROPIC_API_KEY", llm_raw.get("api_key", "")),
+        api_key=os.environ.get(env_key, llm_raw.get("api_key", "")),
         max_tokens=llm_raw.get("max_tokens", 4096),
         temperature=llm_raw.get("temperature", 0.0),
     )

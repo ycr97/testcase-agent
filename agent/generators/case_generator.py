@@ -3,21 +3,18 @@
 
 from __future__ import annotations
 
-import json
 import logging
 
-from agent.schemas.api_schema import APIEndpoint
-from agent.schemas.test_case import TestCase, TestSuite
-from agent.llm.client import LLMClient
-from agent.llm.prompts import (
-    SYSTEM_CASE_GENERATOR,
-    SYSTEM_GAP_ANALYZER,
-    PROMPT_GENERATE_NORMAL_CASES,
-    PROMPT_GENERATE_ABNORMAL_CASES,
-    PROMPT_GENERATE_BOUNDARY_CASES,
-    PROMPT_ANALYZE_GAPS,
+from agent.models.factory import create_llm
+from agent.prompts.gap_analysis import ANALYZE_GAPS
+from agent.prompts.generation import (
+    GENERATE_ABNORMAL_CASES,
+    GENERATE_BOUNDARY_CASES,
+    GENERATE_NORMAL_CASES,
 )
-from agent.llm.tools import TOOL_GENERATE_TEST_CASES
+from agent.schemas.api_schema import APIEndpoint
+from agent.schemas.llm_output import GeneratedCases
+from agent.schemas.test_case import TestCase, TestSuite
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +22,8 @@ logger = logging.getLogger(__name__)
 class CaseGenerator:
     """三轮生成策略：正常 → 异常 → 边界，每轮独立调用 LLM。"""
 
-    def __init__(self, llm_client: LLMClient | None = None):
-        self._llm = llm_client or LLMClient()
+    def __init__(self, llm=None):
+        self._llm = llm
 
     def generate(self, endpoint: APIEndpoint, categories: list[str] | None = None) -> TestSuite:
         """
@@ -43,10 +40,13 @@ class CaseGenerator:
         all_cases: list[TestCase] = []
 
         prompt_map = {
-            "normal": PROMPT_GENERATE_NORMAL_CASES,
-            "abnormal": PROMPT_GENERATE_ABNORMAL_CASES,
-            "boundary": PROMPT_GENERATE_BOUNDARY_CASES,
+            "normal": GENERATE_NORMAL_CASES,
+            "abnormal": GENERATE_ABNORMAL_CASES,
+            "boundary": GENERATE_BOUNDARY_CASES,
         }
+        structured_llm = (self._llm or create_llm()).with_structured_output(
+            GeneratedCases
+        ).with_retry(stop_after_attempt=3)
 
         for category in categories:
             prompt_template = prompt_map.get(category)
@@ -55,9 +55,9 @@ class CaseGenerator:
 
             logger.info(f"生成 {category} 场景用例...")
             cases = self._generate_round(
-                prompt_template.format(endpoint_json=endpoint_json),
-                endpoint.path,
-                endpoint.method,
+                structured_llm,
+                prompt_template.invoke({"endpoint_json": endpoint_json}),
+                endpoint,
             )
             all_cases.extend(cases)
             logger.info(f"  -> 生成 {len(cases)} 个 {category} 用例")
@@ -80,43 +80,43 @@ class CaseGenerator:
             existing_code: 已有的测试代码
         """
         endpoint_json = endpoint.model_dump_json(indent=2, exclude_none=True)
-        prompt = PROMPT_ANALYZE_GAPS.format(
-            existing_code=existing_code,
-            endpoint_json=endpoint_json,
-        )
-
         logger.info("分析已有代码，查找缺失用例...")
-        cases = self._generate_round(prompt, endpoint.path, endpoint.method, system=SYSTEM_GAP_ANALYZER)
+        structured_llm = (self._llm or create_llm()).with_structured_output(
+            GeneratedCases
+        ).with_retry(stop_after_attempt=3)
+        cases = self._generate_round(
+            structured_llm,
+            ANALYZE_GAPS.invoke(
+                {
+                    "existing_code": existing_code,
+                    "endpoint_json": endpoint_json,
+                }
+            ),
+            endpoint,
+        )
         logger.info(f"  -> 发现 {len(cases)} 个缺失用例")
         return cases
 
     def _generate_round(
         self,
-        prompt: str,
-        endpoint_path: str,
-        method: str,
-        system: str = SYSTEM_CASE_GENERATOR,
+        structured_llm,
+        prompt,
+        endpoint: APIEndpoint,
     ) -> list[TestCase]:
         """单轮生成。"""
-        result = self._llm.chat_with_tools(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[TOOL_GENERATE_TEST_CASES],
-            system=system,
-            tool_choice={"type": "tool", "name": "generate_test_cases"},
-        )
-
-        if not result:
-            return []
+        result: GeneratedCases = structured_llm.invoke(prompt)
 
         cases = []
-        for case_data in result.get("cases", []):
-            # 补全缺失字段
-            case_data.setdefault("endpoint_path", endpoint_path)
-            case_data.setdefault("method", method)
-            case_data.setdefault("priority", "P1")
+        for case in result.cases:
             try:
-                cases.append(TestCase(**case_data))
+                case.endpoint_path = endpoint.path
+                case.method = endpoint.method
+                cases.append(case)
             except Exception as e:
-                logger.warning(f"用例解析失败: {e}, data={json.dumps(case_data, ensure_ascii=False)[:200]}")
+                logger.warning(
+                    "用例解析失败: %s, name=%s",
+                    e,
+                    getattr(case, "name", "<unknown>"),
+                )
 
         return cases

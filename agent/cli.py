@@ -3,13 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import sys
 
 import click
-
-from agent.config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -34,40 +30,35 @@ def cli():
 )
 def generate(swagger_path, text, doc_path, md_path, output_path, categories):
     """从输入源生成测试用例"""
-    from agent.schemas.api_schema import APIDocument
+    from agent.graph.generate_graph import build_generate_graph
 
-    # 1. 解析输入源
-    doc = _parse_input(swagger_path, text, doc_path, md_path)
-    if not doc.endpoints:
-        click.echo("未能从输入中提取到任何接口信息", err=True)
-        sys.exit(1)
+    graph = build_generate_graph()
+    result = graph.invoke(
+        {
+            "input_source": _detect_source(swagger_path, text, doc_path, md_path),
+            "input_path": swagger_path or text or doc_path or md_path,
+            "categories": [c.strip() for c in categories.split(",") if c.strip()],
+            "output_path": output_path,
+            "retry_count": 0,
+            "max_retries": 2,
+            "generated_files": [],
+        }
+    )
 
-    click.echo(f"提取到 {len(doc.endpoints)} 个接口:")
-    for ep in doc.endpoints:
-        click.echo(f"  - {ep.method} {ep.path}: {ep.summary}")
+    document = result.get("document")
+    if not document or not document.endpoints:
+        raise click.ClickException("未能从输入中提取到任何接口信息")
 
-    # 2. 生成测试用例
-    from agent.generators.case_generator import CaseGenerator
-    from agent.generators.code_generator import CodeGenerator
-    from agent.quality.validator import Validator
+    click.echo(f"提取到 {len(document.endpoints)} 个接口:")
+    for endpoint in document.endpoints:
+        click.echo(f"  - {endpoint.method} {endpoint.path}: {endpoint.summary}")
 
-    cat_list = [c.strip() for c in categories.split(",")]
-    generator = CaseGenerator()
-    code_gen = CodeGenerator()
-    validator = Validator()
+    generated_files = result.get("generated_files", [])
+    if not generated_files:
+        raise click.ClickException("未生成测试文件")
 
-    for endpoint in doc.endpoints:
-        click.echo(f"\n生成 {endpoint.summary or endpoint.path} 的测试用例...")
-        suite = generator.generate(endpoint, categories=cat_list)
-
-        # 3. 质量校验
-        suite.cases = validator.validate(suite.cases, endpoint)
-
-        click.echo(f"  正常: {len(suite.normal_cases)} | 异常: {len(suite.abnormal_cases)} | 边界: {len(suite.boundary_cases)}")
-
-        # 4. 生成代码
-        path = code_gen.generate(suite, output_path)
-        click.echo(f"  -> 已生成: {path}")
+    for path in generated_files:
+        click.echo(f"已生成: {path}")
 
 
 @cli.command()
@@ -75,49 +66,33 @@ def generate(swagger_path, text, doc_path, md_path, output_path, categories):
 @click.option("--output", "-o", "output_path", help="输出文件路径")
 def analyze(code_path, output_path):
     """分析已有测试代码，补全缺失用例"""
-    from agent.parsers.code_analyzer import CodeAnalyzer
-    from agent.generators.case_generator import CaseGenerator
-    from agent.generators.code_generator import CodeGenerator
-    from agent.quality.deduplicator import Deduplicator
+    from agent.graph.analyze_graph import build_analyze_graph
 
-    analyzer = CodeAnalyzer()
-    existing_code = analyzer.get_source_code(code_path)
-    existing_names = analyzer.get_existing_test_names(code_path)
+    graph = build_analyze_graph()
+    result = graph.invoke(
+        {
+            "code_path": code_path,
+            "output_path": output_path,
+            "generated_files": [],
+        }
+    )
+
+    existing_names = result.get("existing_names", [])
     click.echo(f"已有 {len(existing_names)} 个测试函数: {existing_names}")
 
-    # 提取接口信息
-    doc = analyzer.parse(code_path)
-    if not doc.endpoints:
-        click.echo("未能从代码中提取接口信息", err=True)
-        sys.exit(1)
-
-    endpoint = doc.endpoints[0]
+    endpoint = result.get("endpoint")
+    if endpoint is None:
+        raise click.ClickException("未能从代码中提取接口信息")
     click.echo(f"识别到接口: {endpoint.method} {endpoint.path}")
 
-    # 生成缺失用例
-    generator = CaseGenerator()
-    gap_cases = generator.analyze_gaps(endpoint, existing_code)
-
-    # 去重
-    dedup = Deduplicator()
-    gap_cases = dedup.deduplicate(gap_cases, existing_names)
+    gap_cases = result.get("deduplicated_cases", [])
     click.echo(f"发现 {len(gap_cases)} 个缺失用例")
-
     if not gap_cases:
         click.echo("没有发现缺失的测试场景")
         return
 
-    from agent.schemas.test_case import TestSuite
-    suite = TestSuite(
-        endpoint_path=endpoint.path,
-        endpoint_summary=f"{endpoint.summary} - 补充用例",
-        base_url=endpoint.base_url,
-        cases=gap_cases,
-    )
-
-    code_gen = CodeGenerator()
-    path = code_gen.generate(suite, output_path)
-    click.echo(f"  -> 已生成补充用例: {path}")
+    for path in result.get("generated_files", []):
+        click.echo(f"已生成补充用例: {path}")
 
 
 @cli.command()
@@ -127,22 +102,29 @@ def analyze(code_path, output_path):
 @click.option("--output", "-o", "output_path", help="输出文件路径")
 def flow(swagger_path, flow_desc, base_url, output_path):
     """生成 E2E 流程测试"""
-    from agent.parsers.swagger_parser import SwaggerParser
-    from agent.orchestrator.flow_builder import FlowBuilder
+    from agent.graph.flow_graph import build_flow_graph
 
-    parser = SwaggerParser()
-    doc = parser.parse(swagger_path)
-    click.echo(f"加载 {len(doc.endpoints)} 个接口")
+    graph = build_flow_graph()
+    result = graph.invoke(
+        {
+            "input_source": "swagger",
+            "input_path": swagger_path,
+            "flow_description": flow_desc,
+            "base_url": base_url or "",
+            "output_path": output_path,
+        }
+    )
 
-    builder = FlowBuilder()
-    flow_def = builder.build(doc.endpoints, flow_desc, base_url or "")
-    click.echo(f"生成流程: {flow_def.name} ({len(flow_def.steps)} 步)")
+    document = result.get("document")
+    flow_definition = result.get("flow_definition")
+    if not document:
+        raise click.ClickException("Swagger 解析失败")
+    if not flow_definition:
+        raise click.ClickException("未生成流程定义")
 
-    # 输出流程定义
-    output = output_path or "generated_tests/flow_definition.json"
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(flow_def.model_dump_json(indent=2, exclude_none=True))
-    click.echo(f"  -> 流程定义: {output}")
+    click.echo(f"加载 {len(document.endpoints)} 个接口")
+    click.echo(f"生成流程: {flow_definition.name} ({len(flow_definition.steps)} 步)")
+    click.echo(f"流程定义: {result.get('generated_file')}")
 
 
 @cli.command()
@@ -164,24 +146,26 @@ def run(file_path, functions):
 
 
 def _parse_input(swagger_path, text, doc_path, md_path):
-    """根据提供的参数选择解析器。"""
-    from agent.schemas.api_schema import APIDocument
+    """兼容旧函数名，转发到输入源检测。"""
+    return _detect_source(swagger_path, text, doc_path, md_path)
 
-    if swagger_path:
-        from agent.parsers.swagger_parser import SwaggerParser
-        return SwaggerParser().parse(swagger_path)
-    elif text:
-        from agent.parsers.text_parser import TextParser
-        return TextParser().parse(text)
-    elif doc_path:
-        from agent.parsers.word_parser import WordParser
-        return WordParser().parse(doc_path)
-    elif md_path:
-        from agent.parsers.markdown_parser import MarkdownParser
-        return MarkdownParser().parse(md_path)
-    else:
-        click.echo("请指定输入源: --from-swagger, --from-text, --from-doc, 或 --from-markdown", err=True)
-        sys.exit(1)
+
+def _detect_source(swagger_path, text, doc_path, md_path) -> str:
+    """校验并识别输入源类型。"""
+    sources = {
+        "swagger": swagger_path,
+        "text": text,
+        "doc": doc_path,
+        "markdown": md_path,
+    }
+    provided = [name for name, value in sources.items() if value]
+    if not provided:
+        raise click.ClickException(
+            "请指定输入源: --from-swagger, --from-text, --from-doc, 或 --from-markdown"
+        )
+    if len(provided) > 1:
+        raise click.ClickException("一次只能指定一个输入源")
+    return provided[0]
 
 
 if __name__ == "__main__":

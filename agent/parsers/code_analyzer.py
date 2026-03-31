@@ -8,16 +8,14 @@ import json
 from pathlib import Path
 
 from agent.parsers.base import BaseParser
-from agent.schemas.api_schema import APIDocument, APIEndpoint, APIParameter
-from agent.llm.client import LLMClient
-from agent.llm.prompts import SYSTEM_API_EXTRACTOR, PROMPT_EXTRACT_FROM_TEXT
+from agent.schemas.api_schema import APIDocument
 
 
 class CodeAnalyzer(BaseParser):
     """分析已有测试代码，提取接口信息和已覆盖的测试场景。"""
 
-    def __init__(self, llm_client: LLMClient | None = None):
-        self._llm = llm_client or LLMClient()
+    def __init__(self, llm=None):
+        self._llm = llm
 
     def parse(self, source: str) -> APIDocument:
         """
@@ -30,6 +28,7 @@ class CodeAnalyzer(BaseParser):
 
         # 用 LLM 从分析结果中提取标准化的接口信息
         from agent.parsers.text_parser import TextParser
+
         text_parser = TextParser(self._llm)
         return text_parser.parse(analysis["summary"])
 

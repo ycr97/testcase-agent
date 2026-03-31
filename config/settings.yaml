@@ -3,7 +3,8 @@
 llm:
   provider: anthropic
   model: claude-sonnet-4-20250514
-  # api_key 建议通过环境变量 ANTHROPIC_API_KEY 设置，不要写在此文件中
+  # provider 支持 anthropic / openai
+  # api_key 建议通过环境变量 ANTHROPIC_API_KEY 或 OPENAI_API_KEY 设置，不要写在此文件中
   max_tokens: 4096
   temperature: 0.0
 
