@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+generated_tests/*.py
+!generated_tests/.gitkeep

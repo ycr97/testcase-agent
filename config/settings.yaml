@@ -1,0 +1,20 @@
+# 测试用例生成 Agent 配置文件
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  # api_key 建议通过环境变量 ANTHROPIC_API_KEY 设置，不要写在此文件中
+  max_tokens: 4096
+  temperature: 0.0
+
+environments:
+  uat:
+    base_urls:
+      promotion: "https://rsp-uat.yuhong.com.cn/api/middle-promotion-center"
+      growth: "https://rsp-uat.yuhong.com.cn/api/rsp-growth-web"
+    # auth_token 建议通过环境变量 AUTH_TOKEN 设置
+    auth_token: ""
+
+output:
+  directory: generated_tests
+  style: requests_plain

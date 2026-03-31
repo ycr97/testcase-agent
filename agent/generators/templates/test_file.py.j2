@@ -1,0 +1,75 @@
+# -*- coding: utf-8 -*-
+"""
+{{ suite.endpoint_summary or suite.endpoint_path }} 接口测试脚本
+{{ method }} {{ suite.endpoint_path }}
+自动生成 by TestCase Agent
+"""
+
+import requests
+import json
+
+# ========== 配置 ==========
+BASE_URL = "{{ suite.base_url }}"
+API_URL = f"{BASE_URL}/{{ suite.endpoint_path.lstrip('/') }}"
+{% if suite.auth_type == 'bearer' %}
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer <请填写你的token>"
+}
+{% else %}
+HEADERS = {
+    "Content-Type": "application/json",
+}
+{% endif %}
+
+
+def call_api(data, method="{{ method }}", url=API_URL):
+    """调用接口"""
+    print(f"请求地址: {url}")
+    print(f"请求参数: {json.dumps(data, ensure_ascii=False, indent=2)}")
+{% if method == 'GET' %}
+    resp = requests.get(url, params=data, headers=HEADERS)
+{% elif method == 'POST' %}
+    resp = requests.post(url, json=data, headers=HEADERS)
+{% elif method == 'PUT' %}
+    resp = requests.put(url, json=data, headers=HEADERS)
+{% elif method == 'DELETE' %}
+    resp = requests.delete(url, json=data, headers=HEADERS)
+{% else %}
+    resp = requests.post(url, json=data, headers=HEADERS)
+{% endif %}
+    print(f"状态码: {resp.status_code}")
+    print(f"traceid: {resp.headers}")
+    try:
+        print(f"响应结果: {json.dumps(resp.json(), ensure_ascii=False, indent=2)}")
+    except Exception:
+        print(f"响应结果: {resp.text}")
+    print("-" * 60)
+    return resp
+
+{% for case in suite.cases %}
+
+def {{ case.name }}():
+    """{{ case.description }}"""
+    print("====== {{ case.name }}: {{ case.description }} ======")
+{% if case.uncertain %}
+    # TODO: 请确认此测试数据是否正确
+{% endif %}
+{% if case.setup_description %}
+    # 前置条件: {{ case.setup_description }}
+{% endif %}
+    data = {{ case.request_data | tojson_cn }}
+    resp = call_api(data)
+    assert resp.status_code == {{ case.expected_status }}, f"期望状态码 {{ case.expected_status }}，实际 {resp.status_code}"
+{% for key, value in (case.expected_response or {}).items() %}
+    assert resp.json().get("{{ key }}") == {{ value | tojson_cn }}, f"期望 {{ key }}={{ value }}，实际 {resp.json().get('{{ key }}')}"
+{% endfor %}
+    return resp
+
+{% endfor %}
+
+if __name__ == "__main__":
+{% for case in suite.cases %}
+    # {{ case.name }}()
+{% endfor %}
+    pass
